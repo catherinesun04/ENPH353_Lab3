@@ -1,87 +1,128 @@
-#!/usr/bin/env python3
+#! /usr/bin/env python3
+
 import rospy
-import cv2
+import cv2 as cv
 import numpy as np
-from cv_bridge import CvBridge
-from sensor_msgs.msg import Image
 from geometry_msgs.msg import Twist
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
 
 class LineFollower:
     def __init__(self):
-        rospy.init_node('line_follower', anonymous=True)
-        self.bridge = CvBridge()
-        self.vel_pub = rospy.Publisher('/cmd_vel', Twist, queue_size=1)
+        rospy.init_node('line_follower')
+        
+        # ROS Publishers and Subscribers
+        self.cmd_pub = rospy.Publisher('/cmd_vel', Twist, queue_size=1)
         self.image_sub = rospy.Subscriber('/rrbot/camera1/image_raw', Image, self.image_callback)
-        self.move_cmd = Twist()
+        self.image_pub = rospy.Publisher('/processed_image', Image, queue_size=1)
+        
+        # OpenCV Bridge
+        self.bridge = CvBridge()
+        
+        # Movement Command
+        self.move = Twist()
+        
+        # Tuned HSV Limits (adjust for your track)
+        self.low_H, self.high_H = 80, 120
+        self.low_S, self.high_S = 100, 255  # Increased saturation range
+        self.low_V, self.high_V = 100, 255  # Brighter value range
 
-        # HSV parameters (calibrate these using lab2.ipynb)
-        self.lower_hsv = np.array([90, 100, 20])
-        self.upper_hsv = np.array([120, 255, 200])
-        self.kernel = np.ones((5, 5), np.uint8)
+        # Control parameters
+        self.avg_x = None
+        self.prev_error = 0
+        self.integral = 0
+        
+        # PID coefficients
+        self.kp = 0.03    # Increased proportional gain
+        self.kd = 0.015   # Derivative term for anticipatory control
+        self.ki = 0.0001  # Small integral term
 
-        # Visualization windows
-        cv2.namedWindow('Camera Feed', cv2.WINDOW_NORMAL)
-        cv2.namedWindow('Tracking Mask', cv2.WINDOW_NORMAL)
-        rospy.loginfo("Line follower node initialized")
+        # Speed parameters
+        self.base_speed = 0.5     # Increased base speed
+        self.min_speed = 0.3       # Minimum speed for tight turns
+        self.max_angular = 1.5     # Maximum turning rate
 
-    def image_callback(self, data):
-        try:
-            # Convert ROS image to OpenCV format
-            cv_image = self.bridge.imgmsg_to_cv2(data, "bgr8")
-            display_image = cv_image.copy()
-            height, width = cv_image.shape[:2]
+        rospy.loginfo("High-Speed Line Follower Initialized")
 
-            # Process bottom third of the image
-            roi = cv_image[2*height//3:, :]
-            hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-            
-            # Create mask
-            mask = cv2.inRange(hsv, self.lower_hsv, self.upper_hsv)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self.kernel)
+    def image_callback(self, msg):
+        # Convert ROS Image message to OpenCV format
+        frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+        height, width = frame.shape[:2]
 
-            # Find largest contour
-            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            if contours:
-                largest_contour = max(contours, key=cv2.contourArea)
-                M = cv2.moments(largest_contour)
+        # Convert to HSV and threshold
+        frame_HSV = cv.cvtColor(frame, cv.COLOR_BGR2HSV)
+        mask = cv.inRange(frame_HSV, (self.low_H, self.low_S, self.low_V), 
+                                      (self.high_H, self.high_S, self.high_V))
+        
+        # Use larger ROI (bottom 1/3 of image)
+        roi_height = height // 3
+        roi_mask = mask[-roi_height:, :]
+        
+        # Find contours
+        contours, _ = cv.findContours(roi_mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+        
+        if self.avg_x is None:
+            self.avg_x = width // 2
+
+        if contours:
+            # Calculate weighted average of contour centroids
+            total_x = 0
+            total_area = 0
+            for cnt in contours:
+                M = cv.moments(cnt)
                 if M['m00'] > 0:
-                    cx = int(M['m10']/M['m00'])
-                    cy = int(M['m01']/M['m00']) + 2*height//3  # Convert to full image coordinates
+                    total_x += M['m10']
+                    total_area += M['m00']
+            
+            if total_area > 0:
+                self.avg_x = int(total_x / total_area)
+                error = self.avg_x - width//2
+                
+                # Dynamic speed adjustment
+                speed_factor = 1.0 - min(abs(error)/(width/2), 1.0)
+                current_speed = self.min_speed + (self.base_speed - self.min_speed) * speed_factor
+                
+                # PID control
+                derivative = error - self.prev_error
+                self.integral += error
+                steering = (self.kp * error) + (self.kd * derivative) + (self.ki * self.integral)
+                
+                # Update previous error
+                self.prev_error = error
+                
+                # Set velocities with limits
+                self.move.linear.x = current_speed
+                self.move.angular.z = -steering
+        else:
+            # Lost line - slow down and search
+            self.move.linear.x = self.min_speed
+            self.move.angular.z = self.max_angular * 0.8
+            self.prev_error = 0
+            self.integral = 0
 
-                    # Draw tracking visuals
-                    cv2.circle(display_image, (cx, cy), 10, (0, 0, 255), -1)
-                    cv2.line(display_image, (width//2, height), (cx, cy), (0, 255, 0), 2)
-
-                    # Simple steering control
-                    error = cx - width//2
-                    self.move_cmd.linear.x = 0.3
-                    self.move_cmd.angular.z = -error * 0.005  # Simple proportional control
-                else:
-                    self.move_cmd.linear.x = 0
-                    self.move_cmd.angular.z = 0
-            else:
-                self.move_cmd.linear.x = 0
-                self.move_cmd.angular.z = 0
-
-            self.vel_pub.publish(self.move_cmd)
-
-            # Display images
-            cv2.imshow('Camera Feed', display_image)
-            cv2.imshow('Tracking Mask', mask)
-            cv2.waitKey(1)
-
-        except Exception as e:
-            rospy.logerr(f"Error: {str(e)}")
-
-    def cleanup(self):
-        self.move_cmd.linear.x = 0
-        self.move_cmd.angular.z = 0
-        self.vel_pub.publish(self.move_cmd)
-        cv2.destroyAllWindows()
+        self.cmd_pub.publish(self.move)
+        
+        # Display Debug Info
+        cv.circle(frame, (self.avg_x, height - 30), 25, (0, 0, 255), -1)
+        cv.putText(frame, f"Speed: {self.move.linear.x:.2f} m/s", (10, 30),
+                   cv.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        cv.putText(frame, f"Steering: {self.move.angular.z:.2f} rad/s", (10, 60),
+                   cv.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        cv.imshow("Line Tracking", frame)
+        cv.imshow("Threshold", mask)
+        
+        # Publish Processed Image
+        processed_image_msg = self.bridge.cv2_to_imgmsg(frame, encoding='bgr8')
+        self.image_pub.publish(processed_image_msg)
+        
+        if cv.waitKey(1) & 0xFF == ord('q'):
+            rospy.signal_shutdown("User quit")
 
 if __name__ == '__main__':
     try:
-        follower = LineFollower()
+        LineFollower()
         rospy.spin()
     except rospy.ROSInterruptException:
-        follower.cleanup()
+        pass
+    finally:
+        cv.destroyAllWindows()
