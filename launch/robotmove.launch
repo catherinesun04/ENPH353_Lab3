@@ -1,0 +1,7 @@
+<launch>
+    <node pkg="enph353_ros_lab" 
+        type="line_follower.py"
+        name="robotmove" 
+        output="screen">
+    </node>
+</launch>
