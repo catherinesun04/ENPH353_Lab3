@@ -38,8 +38,8 @@ class LineFollower:
         self.ki = 0.0001  # Small integral term
 
         # Speed parameters
-        self.base_speed = 0.5     # Increased base speed
-        self.min_speed = 0.3       # Minimum speed for tight turns
+        self.base_speed = 0.8     # Increased base speed
+        self.min_speed = 0.4       # Minimum speed for tight turns
         self.max_angular = 1.5     # Maximum turning rate
 
         rospy.loginfo("High-Speed Line Follower Initialized")
