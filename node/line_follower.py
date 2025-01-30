@@ -34,13 +34,13 @@ class LineFollower:
         
         # PID coefficients
         self.kp = 0.03    # Increased proportional gain
-        self.kd = 0.015   # Derivative term for anticipatory control
+        self.kd = 0.025   # Derivative term for anticipatory control
         self.ki = 0.0001  # Small integral term
 
         # Speed parameters
-        self.base_speed = 0.8     # Increased base speed
-        self.min_speed = 0.4       # Minimum speed for tight turns
-        self.max_angular = 1.5     # Maximum turning rate
+        self.base_speed = .95     # Increased base speed
+        self.min_speed = 0.6      # Minimum speed for tight turns
+        self.max_angular = 1     # Maximum turning rate
 
         rospy.loginfo("High-Speed Line Follower Initialized")
 
@@ -96,7 +96,7 @@ class LineFollower:
         else:
             # Lost line - slow down and search
             self.move.linear.x = self.min_speed
-            self.move.angular.z = self.max_angular * 0.8
+            self.move.angular.z = self.max_angular * 0.6
             self.prev_error = 0
             self.integral = 0
 
